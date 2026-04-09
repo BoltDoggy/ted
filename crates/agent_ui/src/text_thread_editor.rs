@@ -33,7 +33,7 @@ use language::{
     language_settings::{SoftWrap, all_language_settings},
 };
 use language_model::{
-    ConfigurationError, IconOrSvg, LanguageModelImage, LanguageModelRegistry, Role,
+    ConfiguredModel, ConfigurationError, IconOrSvg, LanguageModelImage, LanguageModelRegistry, Role,
 };
 use multi_buffer::MultiBufferRow;
 use picker::{Picker, popover_menu::PickerPopoverMenu};
@@ -41,10 +41,7 @@ use project::{Project, Worktree};
 use project::{ProjectPath, lsp_store::LocalLspAdapterDelegate};
 use rope::Point;
 use serde::{Deserialize, Serialize};
-use settings::{
-    LanguageModelProviderSetting, LanguageModelSelection, Settings, SettingsStore,
-    update_settings_file,
-};
+use settings::{Settings, SettingsStore};
 use std::{
     any::{Any, TypeId},
     cmp,
@@ -214,6 +211,7 @@ pub struct TextThreadEditor {
     dragged_file_worktrees: Vec<Entity<Worktree>>,
     language_model_selector: Entity<LanguageModelSelector>,
     language_model_selector_menu_handle: PopoverMenuHandle<LanguageModelSelector>,
+    selected_model: Option<ConfiguredModel>,
 }
 
 const MAX_TAB_TITLE_LEN: usize = 16;
@@ -355,6 +353,8 @@ impl TextThreadEditor {
             .to_vec();
         let slash_commands = text_thread.read(cx).slash_commands().clone();
         let focus_handle = editor.read(cx).focus_handle(cx);
+        let selected_model = LanguageModelRegistry::read_global(cx).default_model();
+        let text_thread_editor = cx.entity().downgrade();
 
         let mut this = Self {
             text_thread,
@@ -377,24 +377,18 @@ impl TextThreadEditor {
             dragged_file_worktrees: Vec::new(),
             language_model_selector: cx.new(|cx| {
                 language_model_selector(
-                    |cx| LanguageModelRegistry::read_global(cx).default_model(),
                     {
-                        let fs = fs.clone();
+                        let selected_model = selected_model.clone();
+                        move |_| selected_model.clone()
+                    },
+                    {
+                        let text_thread_editor = text_thread_editor.clone();
                         move |model, cx| {
-                            update_settings_file(fs.clone(), cx, move |settings, _| {
-                                let provider = model.provider_id().0.to_string();
-                                let model_id = model.id().0.to_string();
-                                settings.agent.get_or_insert_default().set_model(
-                                    LanguageModelSelection {
-                                        provider: LanguageModelProviderSetting(provider),
-                                        model: model_id,
-                                        enable_thinking: model.supports_thinking(),
-                                        effort: model
-                                            .default_effort_level()
-                                            .map(|effort| effort.value.to_string()),
-                                    },
-                                )
-                            });
+                            text_thread_editor
+                                .update(cx, |text_thread_editor, cx| {
+                                    text_thread_editor.set_selected_model(model, cx);
+                                })
+                                .ok();
                         }
                     },
                     {
@@ -408,13 +402,14 @@ impl TextThreadEditor {
                             );
                         }
                     },
-                    true, // Use popover styles for picker
+                    true,
                     focus_handle,
                     window,
                     cx,
                 )
             }),
             language_model_selector_menu_handle: PopoverMenuHandle::default(),
+            selected_model,
         };
         this.update_message_headers(cx);
         this.update_image_blocks(cx);
@@ -439,6 +434,22 @@ impl TextThreadEditor {
         });
     }
 
+    fn selected_model(&self) -> Option<ConfiguredModel> {
+        self.selected_model.clone()
+    }
+
+    fn set_selected_model(&mut self, model: Arc<dyn language_model::LanguageModel>, cx: &mut Context<Self>) {
+        let provider = LanguageModelRegistry::read_global(cx)
+            .visible_providers()
+            .into_iter()
+            .find(|provider| provider.id() == model.provider_id());
+        self.selected_model = provider.map(|provider| ConfiguredModel { provider, model });
+        self.text_thread.update(cx, |text_thread, cx| {
+            text_thread.count_remaining_tokens(self.selected_model.clone(), cx)
+        });
+        cx.notify();
+    }
+
     pub fn text_thread(&self) -> &Entity<TextThread> {
         &self.text_thread
     }
@@ -455,6 +466,9 @@ impl TextThreadEditor {
         let command = self.text_thread.update(cx, |text_thread, cx| {
             text_thread.reparse(cx);
             text_thread.parsed_slash_commands()[0].clone()
+        });
+        self.text_thread.update(cx, |text_thread, cx| {
+            text_thread.count_remaining_tokens(self.selected_model(), cx)
         });
         self.run_command(
             command.source_range,
@@ -479,7 +493,7 @@ impl TextThreadEditor {
         self.last_error = None;
         if let Some(user_message) = self
             .text_thread
-            .update(cx, |text_thread, cx| text_thread.assist(cx))
+            .update(cx, |text_thread, cx| text_thread.assist(self.selected_model(), cx))
         {
             let new_selection = {
                 let cursor = user_message
@@ -2164,7 +2178,7 @@ impl TextThreadEditor {
 
     fn render_remaining_tokens(&self, cx: &App) -> Option<impl IntoElement + use<>> {
         let (token_count_color, token_count, max_token_count, tooltip) =
-            match token_state(&self.text_thread, cx)? {
+            match token_state(&self.text_thread, self.selected_model.as_ref(), cx)? {
                 TokenState::NoTokensLeft {
                     max_token_count,
                     token_count,
@@ -2212,7 +2226,7 @@ impl TextThreadEditor {
     fn render_send_button(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
 
-        let (style, tooltip) = match token_state(&self.text_thread, cx) {
+        let (style, tooltip) = match token_state(&self.text_thread, self.selected_model.as_ref(), cx) {
             Some(TokenState::NoTokensLeft { .. }) => (
                 ButtonStyle::Tinted(TintColor::Error),
                 Some(Tooltip::text("Token limit reached")(window, cx)),
@@ -2258,8 +2272,9 @@ impl TextThreadEditor {
     /// if the user has not accepted the terms of service for this provider.
     fn sending_disabled(&self, cx: &mut Context<'_, TextThreadEditor>) -> bool {
         let model_registry = LanguageModelRegistry::read_global(cx);
+        let configured_model = self.selected_model.as_ref().cloned();
         let Some(configuration_error) =
-            model_registry.configuration_error(model_registry.default_model(), cx)
+            model_registry.configuration_error(configured_model, cx)
         else {
             return false;
         };
@@ -2291,17 +2306,13 @@ impl TextThreadEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active_model = LanguageModelRegistry::read_global(cx)
-            .default_model()
-            .map(|default| default.model);
+        let active_model = self.selected_model().map(|configured| configured.model);
         let model_name = match active_model {
             Some(model) => model.name().0,
             None => SharedString::from("Select Model"),
         };
 
-        let active_provider = LanguageModelRegistry::read_global(cx)
-            .default_model()
-            .map(|default| default.provider);
+        let active_provider = self.selected_model().map(|configured| configured.provider);
 
         let provider_icon = active_provider
             .as_ref()
@@ -3214,11 +3225,16 @@ enum TokenState {
     },
 }
 
-fn token_state(text_thread: &Entity<TextThread>, cx: &App) -> Option<TokenState> {
+fn token_state(
+    text_thread: &Entity<TextThread>,
+    configured_model: Option<&ConfiguredModel>,
+    cx: &App,
+) -> Option<TokenState> {
     const WARNING_TOKEN_THRESHOLD: f32 = 0.8;
 
-    let model = LanguageModelRegistry::read_global(cx)
-        .default_model()?
+    let model = configured_model
+        .cloned()
+        .or_else(|| LanguageModelRegistry::read_global(cx).default_model())?
         .model;
     let token_count = text_thread.read(cx).token_count()?;
     let max_token_count = model.max_token_count();

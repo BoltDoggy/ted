@@ -1203,7 +1203,7 @@ async fn test_summarization(cx: &mut TestAppContext) {
 
     // Send a message
     text_thread.update(cx, |text_thread, cx| {
-        text_thread.assist(cx);
+        text_thread.assist(None, cx);
     });
 
     simulate_successful_response(&fake_model, cx);
@@ -1258,7 +1258,7 @@ async fn test_thread_summary_error_retry(cx: &mut TestAppContext) {
 
     // Sending another message should not trigger another summarize request
     text_thread.update(cx, |text_thread, cx| {
-        text_thread.assist(cx);
+        text_thread.assist(None, cx);
     });
 
     simulate_successful_response(&fake_model, cx);
@@ -1303,7 +1303,7 @@ fn test_summarize_error(
 
     // Send a message
     text_thread.update(cx, |text_thread, cx| {
-        text_thread.assist(cx);
+        text_thread.assist(None, cx);
     });
 
     simulate_successful_response(model, cx);

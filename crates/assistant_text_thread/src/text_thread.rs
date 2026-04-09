@@ -18,7 +18,7 @@ use itertools::Itertools as _;
 use language::{AnchorRangeExt, Bias, Buffer, LanguageRegistry, OffsetRangeExt, Point, ToOffset};
 use language_model::{
     AnthropicCompletionType, AnthropicEventData, AnthropicEventType, CompletionIntent,
-    LanguageModel, LanguageModelCacheConfiguration, LanguageModelCompletionEvent,
+    ConfiguredModel, LanguageModel, LanguageModelCacheConfiguration, LanguageModelCompletionEvent,
     LanguageModelImage, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
     LanguageModelToolUseId, MessageContent, PaymentRequiredError, Role, StopReason,
     report_anthropic_event,
@@ -788,7 +788,7 @@ impl TextThread {
         this.message_anchors.push(message);
 
         this.set_language(cx);
-        this.count_remaining_tokens(cx);
+        this.count_remaining_tokens(None, cx);
         this
     }
 
@@ -1219,7 +1219,7 @@ impl TextThread {
                 TextThreadOperation::BufferOperation(operation.clone()),
             )),
             language::BufferEvent::Edited { .. } => {
-                self.count_remaining_tokens(cx);
+                self.count_remaining_tokens(None, cx);
                 self.reparse(cx);
                 cx.emit(TextThreadEvent::MessagesEdited);
             }
@@ -1231,10 +1231,15 @@ impl TextThread {
         self.token_count
     }
 
-    pub(crate) fn count_remaining_tokens(&mut self, cx: &mut Context<Self>) {
+    pub fn count_remaining_tokens(
+        &mut self,
+        model: Option<ConfiguredModel>,
+        cx: &mut Context<Self>,
+    ) {
         // Assume it will be a Chat request, even though that takes fewer tokens (and risks going over the limit),
         // because otherwise you see in the UI that your empty message has a bunch of tokens already used.
-        let Some(model) = LanguageModelRegistry::read_global(cx).default_model() else {
+        let Some(model) = model.or_else(|| LanguageModelRegistry::read_global(cx).default_model())
+        else {
             return;
         };
         let request = self.to_completion_request(Some(&model.model), cx);
@@ -1975,7 +1980,7 @@ impl TextThread {
     }
 
     pub fn completion_provider_changed(&mut self, cx: &mut Context<Self>) {
-        self.count_remaining_tokens(cx);
+        self.count_remaining_tokens(None, cx);
     }
 
     fn get_last_valid_message_id(&self, cx: &Context<Self>) -> Option<MessageId> {
@@ -1987,9 +1992,13 @@ impl TextThread {
         })
     }
 
-    pub fn assist(&mut self, cx: &mut Context<Self>) -> Option<MessageAnchor> {
+    pub fn assist(
+        &mut self,
+        model: Option<ConfiguredModel>,
+        cx: &mut Context<Self>,
+    ) -> Option<MessageAnchor> {
         let model_registry = LanguageModelRegistry::read_global(cx);
-        let model = model_registry.default_model()?;
+        let model = model.or_else(|| model_registry.default_model())?;
         let last_message_id = self.get_last_valid_message_id(cx)?;
 
         if !model.provider.is_authenticated(cx) {
