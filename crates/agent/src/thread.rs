@@ -2563,14 +2563,19 @@ impl Thread {
     }
 
     pub fn generate_title(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = self.summarization_model.clone() else {
+        self.generate_title_with_model(None, cx);
+    }
+
+    pub fn generate_title_with_model(
+        &mut self,
+        model: Option<Arc<dyn LanguageModel>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = model.or_else(|| self.summarization_model.clone()) else {
             return;
         };
 
-        log::debug!(
-            "Generating title with model: {:?}",
-            self.summarization_model.as_ref().map(|model| model.name())
-        );
+        log::debug!("Generating title with model: {:?}", model.name());
         let mut request = LanguageModelRequest {
             intent: Some(CompletionIntent::ThreadSummarization),
             temperature: AgentSettings::temperature_for_model(&model, cx),

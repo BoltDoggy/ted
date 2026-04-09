@@ -3187,9 +3187,10 @@ impl AgentPanel {
 
     fn handle_regenerate_thread_title(conversation_view: Entity<ConversationView>, cx: &mut App) {
         conversation_view.update(cx, |conversation_view, cx| {
+            let current_model = conversation_view.current_title_generation_model(cx);
             if let Some(thread) = conversation_view.as_native_thread(cx) {
                 thread.update(cx, |thread, cx| {
-                    thread.generate_title(cx);
+                    thread.generate_title_with_model(current_model, cx);
                 });
             }
         });

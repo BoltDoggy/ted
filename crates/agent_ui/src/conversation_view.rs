@@ -33,7 +33,7 @@ use gpui::{
     list, point, pulsating_between,
 };
 use language::Buffer;
-use language_model::LanguageModelRegistry;
+use language_model::{LanguageModel, LanguageModelRegistry};
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use parking_lot::RwLock;
 use project::{AgentId, AgentServerStore, Project, ProjectEntryId};
@@ -343,6 +343,13 @@ impl ConversationView {
             }
             _ => None,
         }
+    }
+
+    pub fn current_title_generation_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
+        let model_id = self.active_thread()?.read(cx).current_model_id(cx)?;
+        LanguageModelRegistry::read_global(cx)
+            .available_models(cx)
+            .find(|model| model.id().0.as_ref() == model_id)
     }
 
     pub fn thread_view(&self, session_id: &acp::SessionId) -> Option<Entity<ThreadView>> {
