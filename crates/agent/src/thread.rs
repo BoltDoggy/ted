@@ -2592,6 +2592,7 @@ impl Thread {
 
             let generate = async {
                 let mut messages = model.stream_completion(request, cx).await?;
+                let mut in_think_block = false;
                 while let Some(event) = messages.next().await {
                     let event = event?;
                     let text = match event {
@@ -2599,12 +2600,31 @@ impl Thread {
                         _ => continue,
                     };
 
-                    let mut lines = text.lines();
-                    title.extend(lines.next());
+                    for line in text.lines() {
+                        let trimmed = line.trim();
 
-                    // Stop if the LLM generated multiple lines.
-                    if lines.next().is_some() {
-                        break;
+                        if in_think_block {
+                            if trimmed == "</think>" {
+                                in_think_block = false;
+                            }
+                            continue;
+                        }
+
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+
+                        if trimmed == "<think>" {
+                            in_think_block = true;
+                            continue;
+                        }
+
+                        if trimmed == "</think>" {
+                            continue;
+                        }
+
+                        title.push_str(trimmed);
+                        return anyhow::Ok(());
                     }
                 }
                 anyhow::Ok(())

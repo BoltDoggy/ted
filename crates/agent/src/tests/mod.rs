@@ -3133,9 +3133,9 @@ async fn test_title_generation(cx: &mut TestAppContext) {
     thread.read_with(cx, |thread, _| assert_eq!(thread.title(), None));
 
     // Ensure the summary model has been invoked to generate a title.
-    summary_model.send_last_completion_stream_text_chunk("Hello ");
-    summary_model.send_last_completion_stream_text_chunk("world\nG");
-    summary_model.send_last_completion_stream_text_chunk("oodnight Moon");
+    summary_model.send_last_completion_stream_text_chunk("<think>\n");
+    summary_model.send_last_completion_stream_text_chunk("Need a short title\n");
+    summary_model.send_last_completion_stream_text_chunk("</think>\nHello world");
     summary_model.end_last_completion_stream();
     send.collect::<Vec<_>>().await;
     cx.run_until_parked();
