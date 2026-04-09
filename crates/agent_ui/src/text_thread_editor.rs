@@ -34,7 +34,8 @@ use language::{
     language_settings::{SoftWrap, all_language_settings},
 };
 use language_model::{
-    ConfiguredModel, ConfigurationError, IconOrSvg, LanguageModelImage, LanguageModelRegistry, Role,
+    ConfiguredModel, ConfigurationError, IconOrSvg, LanguageModelId, LanguageModelImage,
+    LanguageModelProviderId, LanguageModelRegistry, Role,
 };
 use multi_buffer::MultiBufferRow;
 use picker::{Picker, popover_menu::PickerPopoverMenu};
@@ -192,6 +193,7 @@ pub struct TextThreadEditor {
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     lsp_adapter_delegate: Option<Arc<dyn LspAdapterDelegate>>,
+    workspace_id: Option<WorkspaceId>,
     editor: Entity<Editor>,
     title_editor: Entity<Editor>,
     pending_thought_process: Option<(CreaseId, language::Anchor)>,
@@ -275,11 +277,13 @@ impl TextThreadEditor {
             workspace.activate_item(&existing_editor, true, true, window, cx);
             existing_editor
         } else {
+            let workspace_id = workspace.database_id();
             let text_thread_editor = cx.new(|cx| {
                 Self::for_text_thread(
                     text_thread,
                     fs,
                     workspace.weak_handle(),
+                    workspace_id,
                     project,
                     lsp_adapter_delegate,
                     window,
@@ -301,6 +305,7 @@ impl TextThreadEditor {
         text_thread: Entity<TextThread>,
         fs: Arc<dyn Fs>,
         workspace: WeakEntity<Workspace>,
+        workspace_id: Option<WorkspaceId>,
         project: Entity<Project>,
         lsp_adapter_delegate: Option<Arc<dyn LspAdapterDelegate>>,
         window: &mut Window,
@@ -362,7 +367,8 @@ impl TextThreadEditor {
             .to_vec();
         let slash_commands = text_thread.read(cx).slash_commands().clone();
         let focus_handle = editor.read(cx).focus_handle(cx);
-        let selected_model = LanguageModelRegistry::read_global(cx).default_model();
+        let selected_model = load_persisted_selected_model(workspace_id, &text_thread, cx)
+            .or_else(|| LanguageModelRegistry::read_global(cx).default_model());
         let text_thread_editor = cx.entity().downgrade();
 
         let mut this = Self {
@@ -371,6 +377,7 @@ impl TextThreadEditor {
             editor,
             title_editor,
             lsp_adapter_delegate,
+            workspace_id,
             blocks: Default::default(),
             image_blocks: Default::default(),
             scroll_position: None,
@@ -454,6 +461,12 @@ impl TextThreadEditor {
             .into_iter()
             .find(|provider| provider.id() == model.provider_id());
         self.selected_model = provider.map(|provider| ConfiguredModel { provider, model });
+        persist_selected_model(
+            self.workspace_id,
+            &self.text_thread,
+            self.selected_model.as_ref(),
+            cx,
+        );
         self.text_thread.update(cx, |text_thread, cx| {
             text_thread.count_remaining_tokens(self.selected_model.clone(), cx)
         });
@@ -3086,7 +3099,7 @@ impl SerializableItem for TextThreadEditor {
         cx: &mut App,
     ) -> Task<Result<Entity<Self>>> {
         let db = persistence::TextThreadEditorDb::global(cx);
-        let Some((path, text_thread_id, is_remote)) = db
+        let Some((path, text_thread_id, is_remote, _, _)) = db
             .get_text_thread_editor(item_id, workspace_id)
             .log_err()
             .flatten()
@@ -3136,6 +3149,7 @@ impl SerializableItem for TextThreadEditor {
                         text_thread,
                         fs,
                         workspace,
+                        None,
                         project,
                         lsp_adapter_delegate,
                         window,
@@ -3159,11 +3173,27 @@ impl SerializableItem for TextThreadEditor {
         let path = text_thread.path().map(|path| path.to_path_buf());
         let text_thread_id = text_thread.id().to_proto();
         let is_remote = text_thread.path().is_none();
+        let selected_model_provider_id = self
+            .selected_model
+            .as_ref()
+            .map(|model| model.provider.id().0.to_string());
+        let selected_model_id = self
+            .selected_model
+            .as_ref()
+            .map(|model| model.model.id().0.to_string());
 
         let db = persistence::TextThreadEditorDb::global(cx);
         Some(cx.background_spawn(async move {
-            db.save_text_thread_editor(item_id, workspace_id, path, text_thread_id, is_remote)
-                .await
+            db.save_text_thread_editor(
+                item_id,
+                workspace_id,
+                path,
+                text_thread_id,
+                is_remote,
+                selected_model_provider_id,
+                selected_model_id,
+            )
+            .await
         }))
     }
 
@@ -3351,6 +3381,72 @@ enum TokenState {
     },
 }
 
+fn resolve_configured_model(
+    provider_id: &LanguageModelProviderId,
+    model_id: &LanguageModelId,
+    cx: &App,
+) -> Option<ConfiguredModel> {
+    LanguageModelRegistry::read_global(cx)
+        .visible_providers()
+        .into_iter()
+        .find(|provider| provider.id() == *provider_id)
+        .and_then(|provider| {
+            provider
+                .provided_models(cx)
+                .into_iter()
+                .find(|model| model.id() == *model_id)
+                .map(|model| ConfiguredModel { provider, model })
+        })
+}
+
+fn persist_selected_model(
+    workspace_id: Option<WorkspaceId>,
+    text_thread: &Entity<TextThread>,
+    selected_model: Option<&ConfiguredModel>,
+    cx: &App,
+) {
+    let Some(workspace_id) = workspace_id else {
+        return;
+    };
+
+    let text_thread_id = text_thread.read(cx).id().to_proto();
+    let selected_model_provider_id = selected_model
+        .map(|model| model.provider.id().0.to_string());
+    let selected_model_id = selected_model.map(|model| model.model.id().0.to_string());
+    let db = persistence::TextThreadEditorDb::global(cx);
+
+    cx.background_spawn(async move {
+        db.save_text_thread_model(
+            workspace_id,
+            text_thread_id,
+            selected_model_provider_id,
+            selected_model_id,
+        )
+        .await
+    })
+    .detach();
+}
+
+fn load_persisted_selected_model(
+    workspace_id: Option<WorkspaceId>,
+    text_thread: &Entity<TextThread>,
+    cx: &App,
+) -> Option<ConfiguredModel> {
+    let workspace_id = workspace_id?;
+    let text_thread_id = text_thread.read(cx).id().to_proto();
+    let db = persistence::TextThreadEditorDb::global(cx);
+    let (provider_id, model_id) = db
+        .get_text_thread_editor_model(text_thread_id, workspace_id)
+        .log_err()
+        .flatten()?;
+
+    resolve_configured_model(
+        &LanguageModelProviderId::from(provider_id?),
+        &LanguageModelId::from(model_id?),
+        cx,
+    )
+}
+
 fn token_state(
     text_thread: &Entity<TextThread>,
     configured_model: Option<&ConfiguredModel>,
@@ -3471,19 +3567,39 @@ mod persistence {
     impl Domain for TextThreadEditorDb {
         const NAME: &str = stringify!(TextThreadEditorDb);
 
-        const MIGRATIONS: &[&str] = &[sql!(
-            CREATE TABLE text_thread_editors (
-                workspace_id INTEGER,
-                item_id INTEGER UNIQUE,
-                path BLOB,
-                text_thread_id TEXT NOT NULL,
-                is_remote INTEGER NOT NULL,
+        const MIGRATIONS: &[&str] = &[
+            sql!(
+                CREATE TABLE text_thread_editors (
+                    workspace_id INTEGER,
+                    item_id INTEGER UNIQUE,
+                    path BLOB,
+                    text_thread_id TEXT NOT NULL,
+                    is_remote INTEGER NOT NULL,
 
-                PRIMARY KEY(workspace_id, item_id),
-                FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
-                ON DELETE CASCADE
-            ) STRICT;
-        )];
+                    PRIMARY KEY(workspace_id, item_id),
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                    ON DELETE CASCADE
+                ) STRICT;
+            ),
+            sql!(
+                ALTER TABLE text_thread_editors ADD COLUMN selected_model_provider_id TEXT;
+            ),
+            sql!(
+                ALTER TABLE text_thread_editors ADD COLUMN selected_model_id TEXT;
+            ),
+            sql!(
+                CREATE TABLE text_thread_model_selections (
+                    workspace_id INTEGER,
+                    text_thread_id TEXT NOT NULL,
+                    selected_model_provider_id TEXT,
+                    selected_model_id TEXT,
+
+                    PRIMARY KEY(workspace_id, text_thread_id),
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                    ON DELETE CASCADE
+                ) STRICT;
+            ),
+        ];
     }
 
     db::static_connection!(TextThreadEditorDb, [WorkspaceDb]);
@@ -3497,15 +3613,42 @@ mod persistence {
 
     impl TextThreadEditorDb {
         query! {
+            pub async fn save_text_thread_model(
+                workspace_id: WorkspaceId,
+                text_thread_id: String,
+                selected_model_provider_id: Option<String>,
+                selected_model_id: Option<String>
+            ) -> Result<()> {
+                INSERT OR REPLACE INTO text_thread_model_selections(
+                    workspace_id,
+                    text_thread_id,
+                    selected_model_provider_id,
+                    selected_model_id
+                )
+                VALUES (?, ?, ?, ?)
+            }
+        }
+
+        query! {
             pub async fn save_text_thread_editor(
                 item_id: ItemId,
                 workspace_id: WorkspaceId,
                 path: Option<PathBuf>,
                 text_thread_id: String,
-                is_remote: bool
+                is_remote: bool,
+                selected_model_provider_id: Option<String>,
+                selected_model_id: Option<String>
             ) -> Result<()> {
-                INSERT OR REPLACE INTO text_thread_editors(item_id, workspace_id, path, text_thread_id, is_remote)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO text_thread_editors(
+                    item_id,
+                    workspace_id,
+                    path,
+                    text_thread_id,
+                    is_remote,
+                    selected_model_provider_id,
+                    selected_model_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             }
         }
 
@@ -3513,10 +3656,21 @@ mod persistence {
             pub fn get_text_thread_editor(
                 item_id: ItemId,
                 workspace_id: WorkspaceId
-            ) -> Result<Option<(Option<PathBuf>, String, bool)>> {
-                SELECT path, text_thread_id, is_remote
+            ) -> Result<Option<(Option<PathBuf>, String, bool, Option<String>, Option<String>)>> {
+                SELECT path, text_thread_id, is_remote, selected_model_provider_id, selected_model_id
                 FROM text_thread_editors
                 WHERE item_id = ? AND workspace_id = ?
+            }
+        }
+
+        query! {
+            pub fn get_text_thread_editor_model(
+                text_thread_id: String,
+                workspace_id: WorkspaceId
+            ) -> Result<Option<(Option<String>, Option<String>)>> {
+                SELECT selected_model_provider_id, selected_model_id
+                FROM text_thread_model_selections
+                WHERE text_thread_id = ? AND workspace_id = ?
             }
         }
     }
@@ -3713,12 +3867,14 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
 
         let weak_workspace = workspace.downgrade();
+        let workspace_id = workspace.read_with(&cx, |workspace, _| workspace.database_id());
         let text_thread_editor = workspace.update_in(&mut cx, |_, window, cx| {
             cx.new(|cx| {
                 TextThreadEditor::for_text_thread(
                     text_thread.clone(),
                     fs,
                     weak_workspace,
+                    workspace_id,
                     project,
                     None,
                     window,
