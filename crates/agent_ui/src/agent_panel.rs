@@ -1905,6 +1905,14 @@ impl AgentPanel {
         }
     }
 
+    pub(crate) fn text_thread_store(&self) -> Entity<assistant_text_thread::TextThreadStore> {
+        self.text_thread_store.clone()
+    }
+
+    pub(crate) fn fs(&self) -> Arc<dyn Fs> {
+        self.fs.clone()
+    }
+
     pub(crate) fn active_text_thread_editor(&self, cx: &App) -> Option<Entity<TextThreadEditor>> {
         let workspace = self.workspace.upgrade()?;
         workspace.read(cx).active_item_as::<TextThreadEditor>(cx)
@@ -4384,12 +4392,39 @@ impl AgentPanelDelegate for ConcreteAssistantPanelDelegate {
 
     fn open_remote_text_thread(
         &self,
-        _workspace: &mut Workspace,
-        _text_thread_id: assistant_text_thread::TextThreadId,
-        _window: &mut Window,
-        _cx: &mut Context<Workspace>,
+        workspace: &mut Workspace,
+        text_thread_id: assistant_text_thread::TextThreadId,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
     ) -> Task<Result<Entity<TextThreadEditor>>> {
-        Task::ready(Err(anyhow!("opening remote context not implemented")))
+        let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+            return Task::ready(Err(anyhow!("Agent panel not found")));
+        };
+
+        let text_thread_store = panel.read(cx).text_thread_store.clone();
+        let fs = panel.read(cx).fs.clone();
+        let project = workspace.project().clone();
+        let lsp_adapter_delegate = make_lsp_adapter_delegate(&project, cx).log_err().flatten();
+        let workspace_handle = workspace.weak_handle();
+
+        let open_text_thread = text_thread_store.update(cx, |text_thread_store, cx| {
+            text_thread_store.open_remote(text_thread_id, cx)
+        });
+
+        window.spawn(cx, async move |cx| {
+            let text_thread = open_text_thread.await?;
+            cx.update(|window, cx| {
+                TextThreadEditor::deploy(
+                    text_thread,
+                    fs,
+                    workspace_handle,
+                    project,
+                    lsp_adapter_delegate,
+                    window,
+                    cx,
+                )
+            })?
+        })
     }
 
     fn quote_selection(

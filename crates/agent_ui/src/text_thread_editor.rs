@@ -61,13 +61,13 @@ use ui::{
 };
 use util::{ResultExt, maybe};
 use workspace::{
-    CollaboratorId,
+    CollaboratorId, ItemId, WorkspaceId,
     searchable::{Direction, SearchToken, SearchableItemHandle},
 };
 
 use workspace::{
     Save, Toast, Workspace,
-    item::{self, FollowableItem, Item},
+    item::{self, FollowableItem, Item, SerializableItem},
     notifications::NotificationId,
     pane,
     searchable::{SearchEvent, SearchableItem},
@@ -80,7 +80,7 @@ use crate::{slash_command::SlashCommandCompletionProvider, slash_command_picker}
 use assistant_text_thread::{
     CacheStatus, Content, InvokedSlashCommandId, InvokedSlashCommandStatus, Message, MessageId,
     MessageMetadata, MessageStatus, PendingSlashCommandStatus, TextThread, TextThreadEvent,
-    TextThreadId, ThoughtProcessOutputSection,
+    TextThreadId, TextThreadStore, ThoughtProcessOutputSection,
 };
 
 actions!(
@@ -221,6 +221,7 @@ const MAX_TAB_TITLE_LEN: usize = 16;
 impl TextThreadEditor {
     pub fn init(cx: &mut App) {
         workspace::FollowableViewRegistry::register::<TextThreadEditor>(cx);
+        workspace::register_serializable_item::<TextThreadEditor>(cx);
 
         cx.observe_new(
             |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
@@ -2919,6 +2920,121 @@ impl SearchableItem for TextThreadEditor {
     }
 }
 
+impl SerializableItem for TextThreadEditor {
+    fn serialized_item_kind() -> &'static str {
+        "TextThreadEditor"
+    }
+
+    fn cleanup(
+        workspace_id: WorkspaceId,
+        alive_items: Vec<ItemId>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        workspace::delete_unloaded_items(
+            alive_items,
+            workspace_id,
+            "text_thread_editors",
+            &persistence::TextThreadEditorDb::global(cx),
+            cx,
+        )
+    }
+
+    fn deserialize(
+        project: Entity<Project>,
+        workspace: WeakEntity<Workspace>,
+        workspace_id: WorkspaceId,
+        item_id: ItemId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<Entity<Self>>> {
+        let db = persistence::TextThreadEditorDb::global(cx);
+        let Some((path, text_thread_id, is_remote)) = db
+            .get_text_thread_editor(item_id, workspace_id)
+            .log_err()
+            .flatten()
+        else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "No text thread editor to deserialize"
+            )));
+        };
+        let serialized_editor = persistence::SerializedTextThreadEditor {
+            path,
+            text_thread_id,
+            is_remote,
+        };
+
+        let Some(workspace_handle) = workspace.upgrade() else {
+            return Task::ready(Err(anyhow::anyhow!("workspace gone")));
+        };
+        let Some(panel) = workspace_handle.read(cx).panel::<crate::agent_panel::AgentPanel>(cx) else {
+            return Task::ready(Err(anyhow::anyhow!("Agent panel not found")));
+        };
+
+        let text_thread_store = panel.read(cx).text_thread_store();
+        let fs = panel.read(cx).fs();
+        let lsp_adapter_delegate = make_lsp_adapter_delegate(&project, cx).log_err().flatten();
+
+        window.spawn(cx, async move |cx| {
+            let text_thread = if let Some(path) = serialized_editor.path {
+                text_thread_store
+                    .update(cx, |text_thread_store: &mut TextThreadStore, cx| {
+                        text_thread_store.open_local(path.into(), cx)
+                    })
+                    .await?
+            } else if serialized_editor.is_remote {
+                text_thread_store
+                    .update(cx, |text_thread_store: &mut TextThreadStore, cx| {
+                        text_thread_store
+                            .open_remote(TextThreadId::from_proto(serialized_editor.text_thread_id), cx)
+                    })
+                    .await?
+            } else {
+                return Err(anyhow::anyhow!("Cannot restore unsaved local text thread"));
+            };
+
+            cx.update(|window, cx| {
+                cx.new(|cx| {
+                    TextThreadEditor::for_text_thread(
+                        text_thread,
+                        fs,
+                        workspace,
+                        project,
+                        lsp_adapter_delegate,
+                        window,
+                        cx,
+                    )
+                })
+            })
+        })
+    }
+
+    fn serialize(
+        &mut self,
+        workspace: &mut Workspace,
+        item_id: ItemId,
+        _closing: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<()>>> {
+        let workspace_id = workspace.database_id()?;
+        let text_thread = self.text_thread.read(cx);
+        let path = text_thread.path().map(|path| path.to_path_buf());
+        let text_thread_id = text_thread.id().to_proto();
+        let is_remote = text_thread.path().is_none();
+
+        let db = persistence::TextThreadEditorDb::global(cx);
+        Some(cx.background_spawn(async move {
+            db.save_text_thread_editor(item_id, workspace_id, path, text_thread_id, is_remote)
+                .await
+        }))
+    }
+
+    fn should_serialize(&self, event: &Self::Event) -> bool {
+        matches!(event, EditorEvent::Edited { .. } | EditorEvent::TitleChanged)
+    }
+}
+
 impl FollowableItem for TextThreadEditor {
     fn remote_id(&self) -> Option<workspace::ViewId> {
         self.remote_id
@@ -3199,6 +3315,69 @@ pub fn make_lsp_adapter_delegate(
             ) as Arc<dyn LspAdapterDelegate>))
         })
     })
+}
+
+mod persistence {
+    use db::{query, sqlez::domain::Domain, sqlez_macros::sql};
+    use std::path::PathBuf;
+    use workspace::WorkspaceDb;
+
+    use super::{ItemId, WorkspaceId};
+
+    pub struct TextThreadEditorDb(db::sqlez::thread_safe_connection::ThreadSafeConnection);
+
+    impl Domain for TextThreadEditorDb {
+        const NAME: &str = stringify!(TextThreadEditorDb);
+
+        const MIGRATIONS: &[&str] = &[sql!(
+            CREATE TABLE text_thread_editors (
+                workspace_id INTEGER,
+                item_id INTEGER UNIQUE,
+                path BLOB,
+                text_thread_id TEXT NOT NULL,
+                is_remote INTEGER NOT NULL,
+
+                PRIMARY KEY(workspace_id, item_id),
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                ON DELETE CASCADE
+            ) STRICT;
+        )];
+    }
+
+    db::static_connection!(TextThreadEditorDb, [WorkspaceDb]);
+
+    #[derive(Clone, Debug)]
+    pub struct SerializedTextThreadEditor {
+        pub path: Option<PathBuf>,
+        pub text_thread_id: String,
+        pub is_remote: bool,
+    }
+
+    impl TextThreadEditorDb {
+        query! {
+            pub async fn save_text_thread_editor(
+                item_id: ItemId,
+                workspace_id: WorkspaceId,
+                path: Option<PathBuf>,
+                text_thread_id: String,
+                is_remote: bool
+            ) -> Result<()> {
+                INSERT OR REPLACE INTO text_thread_editors(item_id, workspace_id, path, text_thread_id, is_remote)
+                VALUES (?, ?, ?, ?, ?)
+            }
+        }
+
+        query! {
+            pub fn get_text_thread_editor(
+                item_id: ItemId,
+                workspace_id: WorkspaceId
+            ) -> Result<Option<(Option<PathBuf>, String, bool)>> {
+                SELECT path, text_thread_id, is_remote
+                FROM text_thread_editors
+                WHERE item_id = ? AND workspace_id = ?
+            }
+        }
+    }
 }
 
 #[cfg(test)]
