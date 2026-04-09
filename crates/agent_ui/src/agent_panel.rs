@@ -859,7 +859,9 @@ impl AgentPanel {
         )
         .detach();
 
-        let active_view = ActiveView::Uninitialized;
+        let active_view = ActiveView::History {
+            history: History::TextThreads,
+        };
 
         let weak_panel = cx.entity().downgrade();
 
@@ -982,7 +984,7 @@ impl AgentPanel {
             onboarding,
             text_thread_history,
             thread_store,
-            selected_agent_type: AgentType::default(),
+            selected_agent_type: AgentType::TextThread,
             start_thread_in: StartThreadIn::default(),
             worktree_creation_status: None,
             _thread_view_subscription: None,
@@ -2610,13 +2612,14 @@ impl AgentPanel {
     fn set_worktree_creation_error(
         &mut self,
         message: SharedString,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.worktree_creation_status = Some(WorktreeCreationStatus::Error(message));
         if matches!(self.active_view, ActiveView::Uninitialized) {
-            let selected_agent_type = self.selected_agent_type.clone();
-            self.new_agent_thread(selected_agent_type, window, cx);
+            self.active_view = ActiveView::History {
+                history: History::TextThreads,
+            };
         }
         cx.notify();
     }
@@ -3047,7 +3050,7 @@ impl Panel for AgentPanel {
         });
     }
 
-    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
         if active
             && matches!(self.active_view, ActiveView::Uninitialized)
             && !matches!(
@@ -3055,8 +3058,10 @@ impl Panel for AgentPanel {
                 Some(WorktreeCreationStatus::Creating)
             )
         {
-            let selected_agent_type = self.selected_agent_type.clone();
-            self.new_agent_thread_inner(selected_agent_type, false, window, cx);
+            self.active_view = ActiveView::History {
+                history: History::TextThreads,
+            };
+            cx.notify();
         }
     }
 
