@@ -3889,7 +3889,18 @@ impl AgentPanel {
                         .size_full()
                         .gap(DynamicSpacing::Base04.rems(cx))
                         .pl(DynamicSpacing::Base04.rems(cx))
-                        .child(agent_selector_menu)
+                        .child(
+                            if matches!(
+                                self.active_view,
+                                ActiveView::History {
+                                    history: History::TextThreads,
+                                }
+                            ) {
+                                agent_selector_menu.into_any_element()
+                            } else {
+                                self.render_toolbar_back_button(cx).into_any_element()
+                            },
+                        )
                         .when(
                             has_visible_worktrees && self.project_has_git_repository(cx),
                             |this| this.child(self.render_start_thread_in_selector(cx)),
