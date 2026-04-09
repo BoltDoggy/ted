@@ -1235,6 +1235,68 @@ async fn test_summarization(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_summarization_skips_inline_think_tags(cx: &mut TestAppContext) {
+    let (text_thread, fake_model) = setup_context_editor_with_fake_model(cx);
+
+    let message_1 = text_thread.read_with(cx, |text_thread, _cx| {
+        text_thread.message_anchors[0].clone()
+    });
+    text_thread.update(cx, |context, cx| {
+        context
+            .insert_message_after(message_1.id, Role::Assistant, MessageStatus::Done, cx)
+            .unwrap();
+    });
+
+    text_thread.update(cx, |text_thread, cx| {
+        text_thread.assist(None, cx);
+    });
+
+    simulate_successful_response(&fake_model, cx);
+
+    cx.run_until_parked();
+    fake_model.send_last_completion_stream_text_chunk(
+        "<think>Need a short title</think>Brief Introduction",
+    );
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    text_thread.read_with(cx, |text_thread, _| {
+        assert_eq!(text_thread.summary().or_default(), "Brief Introduction");
+    });
+}
+
+#[gpui::test]
+async fn test_summarization_skips_split_think_tags(cx: &mut TestAppContext) {
+    let (text_thread, fake_model) = setup_context_editor_with_fake_model(cx);
+
+    let message_1 = text_thread.read_with(cx, |text_thread, _cx| {
+        text_thread.message_anchors[0].clone()
+    });
+    text_thread.update(cx, |context, cx| {
+        context
+            .insert_message_after(message_1.id, Role::Assistant, MessageStatus::Done, cx)
+            .unwrap();
+    });
+
+    text_thread.update(cx, |text_thread, cx| {
+        text_thread.assist(None, cx);
+    });
+
+    simulate_successful_response(&fake_model, cx);
+
+    cx.run_until_parked();
+    fake_model.send_last_completion_stream_text_chunk("<th");
+    fake_model.send_last_completion_stream_text_chunk("ink>Need a short title</th");
+    fake_model.send_last_completion_stream_text_chunk("ink>Brief Introduction");
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    text_thread.read_with(cx, |text_thread, _| {
+        assert_eq!(text_thread.summary().or_default(), "Brief Introduction");
+    });
+}
+
+#[gpui::test]
 async fn test_thread_summary_error_set_manually(cx: &mut TestAppContext) {
     let (text_thread, fake_model) = setup_context_editor_with_fake_model(cx);
 
@@ -1270,7 +1332,7 @@ async fn test_thread_summary_error_retry(cx: &mut TestAppContext) {
 
     // But the summarize request can be invoked manually
     text_thread.update(cx, |text_thread, cx| {
-        text_thread.summarize(true, cx);
+        text_thread.summarize(None, true, cx);
     });
 
     text_thread.read_with(cx, |text_thread, _| {

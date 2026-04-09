@@ -2148,7 +2148,7 @@ impl TextThread {
                     this.update(cx, |this, cx| {
                         this.pending_completions
                             .retain(|completion| completion.id != pending_completion_id);
-                        this.summarize(false, cx);
+                        this.summarize(None, false, cx);
                         this.update_cache_status_for_completion(cx);
                     })?;
 
@@ -2644,8 +2644,14 @@ impl TextThread {
         self.message_anchors.insert(insertion_ix, new_anchor);
     }
 
-    pub fn summarize(&mut self, mut replace_old: bool, cx: &mut Context<Self>) {
-        let Some(model) = LanguageModelRegistry::read_global(cx).thread_summary_model() else {
+    pub fn summarize(
+        &mut self,
+        model: Option<ConfiguredModel>,
+        mut replace_old: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let model = model.or_else(|| LanguageModelRegistry::read_global(cx).thread_summary_model());
+        let Some(model) = model else {
             return;
         };
 
@@ -2682,31 +2688,125 @@ impl TextThread {
                     let mut messages = stream.await?;
 
                     let mut replaced = !replace_old;
+                    let mut in_think_block = false;
+                    let mut pending = String::new();
+                    let mut visible_text = String::new();
+                    const THINK_START: &str = "<think>";
+                    const THINK_END: &str = "</think>";
+                    const MAX_TAG_LEN: usize = THINK_END.len();
                     while let Some(message) = messages.stream.next().await {
                         let text = message?;
-                        let mut lines = text.lines();
-                        this.update(cx, |this, cx| {
-                            let version = this.version.clone();
-                            let timestamp = this.next_timestamp();
-                            let summary = this.summary.content_or_set_empty();
-                            if !replaced && replace_old {
-                                summary.text.clear();
-                                replaced = true;
-                            }
-                            summary.text.extend(lines.next());
-                            summary.timestamp = timestamp;
-                            let operation = TextThreadOperation::UpdateSummary {
-                                summary: summary.clone(),
-                                version,
-                            };
-                            this.push_op(operation, cx);
-                            cx.emit(TextThreadEvent::SummaryChanged);
-                            cx.emit(TextThreadEvent::SummaryGenerated);
-                        })?;
+                        pending.push_str(&text);
 
-                        // Stop if the LLM generated multiple lines.
-                        if lines.next().is_some() {
+                        loop {
+                            if in_think_block {
+                                if let Some(end) = pending.find(THINK_END) {
+                                    pending.drain(..end + THINK_END.len());
+                                    in_think_block = false;
+                                    continue;
+                                }
+
+                                if pending.len() > MAX_TAG_LEN - 1 {
+                                    let drain_len = pending.len() - (MAX_TAG_LEN - 1);
+                                    let drain_len = pending.floor_char_boundary(drain_len);
+                                    pending.drain(..drain_len);
+                                }
+                                break;
+                            }
+
+                            let Some(tag_start) = pending.find('<') else {
+                                let safe_len = pending.len().saturating_sub(MAX_TAG_LEN - 1);
+                                let safe_len = pending.floor_char_boundary(safe_len);
+                                if safe_len > 0 {
+                                    visible_text.push_str(&pending[..safe_len]);
+                                    pending.drain(..safe_len);
+                                }
+                                break;
+                            };
+
+                            if tag_start > 0 {
+                                visible_text.push_str(&pending[..tag_start]);
+                                pending.drain(..tag_start);
+                                continue;
+                            }
+
+                            if pending.starts_with(THINK_START) {
+                                pending.drain(..THINK_START.len());
+                                in_think_block = true;
+                                continue;
+                            }
+
+                            if pending.starts_with(THINK_END) {
+                                pending.drain(..THINK_END.len());
+                                continue;
+                            }
+
+                            let is_possible_think_prefix = THINK_START.starts_with(&pending)
+                                || THINK_END.starts_with(&pending);
+                            if is_possible_think_prefix {
+                                break;
+                            }
+
+                            visible_text.push('<');
+                            pending.drain(..1);
+                        }
+
+                        let mut should_stop = false;
+                        while let Some(newline_index) = visible_text.find('\n') {
+                            let first_line = visible_text[..newline_index].trim();
+                            if !first_line.is_empty() {
+                                this.update(cx, |this, cx| {
+                                    let version = this.version.clone();
+                                    let timestamp = this.next_timestamp();
+                                    let summary = this.summary.content_or_set_empty();
+                                    if !replaced && replace_old {
+                                        summary.text.clear();
+                                        replaced = true;
+                                    }
+                                    summary.text.push_str(first_line);
+                                    summary.timestamp = timestamp;
+                                    let operation = TextThreadOperation::UpdateSummary {
+                                        summary: summary.clone(),
+                                        version,
+                                    };
+                                    this.push_op(operation, cx);
+                                    cx.emit(TextThreadEvent::SummaryChanged);
+                                    cx.emit(TextThreadEvent::SummaryGenerated);
+                                })?;
+                                should_stop = true;
+                                break;
+                            }
+                            visible_text.drain(..newline_index + 1);
+                        }
+
+                        if should_stop {
                             break;
+                        }
+                    }
+
+                    if !in_think_block {
+                        visible_text.push_str(&pending);
+                        let first_line = visible_text.lines().next().unwrap_or(visible_text.as_str()).trim();
+                        if !first_line.is_empty() {
+                            this.update(cx, |this, cx| {
+                                let version = this.version.clone();
+                                let timestamp = this.next_timestamp();
+                                let summary = this.summary.content_or_set_empty();
+                                if !replaced && replace_old {
+                                    summary.text.clear();
+                                }
+                                if summary.text.is_empty() {
+                                    summary.text.push_str(first_line);
+                                }
+                                summary.timestamp = timestamp;
+                                let operation = TextThreadOperation::UpdateSummary {
+                                    summary: summary.clone(),
+                                    version,
+                                };
+                                this.push_op(operation, cx);
+                                cx.emit(TextThreadEvent::SummaryChanged);
+                                cx.emit(TextThreadEvent::SummaryGenerated);
+                            })?;
                         }
                     }
 

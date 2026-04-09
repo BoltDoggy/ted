@@ -2598,6 +2598,11 @@ impl Thread {
             let generate = async {
                 let mut messages = model.stream_completion(request, cx).await?;
                 let mut in_think_block = false;
+                let mut pending = String::new();
+                let mut visible_text = String::new();
+                const THINK_START: &str = "<think>";
+                const THINK_END: &str = "</think>";
+                const MAX_TAG_LEN: usize = THINK_END.len();
                 while let Some(event) = messages.next().await {
                     let event = event?;
                     let text = match event {
@@ -2605,31 +2610,76 @@ impl Thread {
                         _ => continue,
                     };
 
-                    for line in text.lines() {
-                        let trimmed = line.trim();
+                    pending.push_str(&text);
 
+                    loop {
                         if in_think_block {
-                            if trimmed == "</think>" {
+                            if let Some(end) = pending.find(THINK_END) {
+                                pending.drain(..end + THINK_END.len());
                                 in_think_block = false;
+                                continue;
                             }
+
+                            if pending.len() > MAX_TAG_LEN - 1 {
+                                let drain_len = pending.len() - (MAX_TAG_LEN - 1);
+                                let drain_len = pending.floor_char_boundary(drain_len);
+                                pending.drain(..drain_len);
+                            }
+                            break;
+                        }
+
+                        let Some(tag_start) = pending.find('<') else {
+                            let safe_len = pending.len().saturating_sub(MAX_TAG_LEN - 1);
+                            let safe_len = pending.floor_char_boundary(safe_len);
+                            if safe_len > 0 {
+                                visible_text.push_str(&pending[..safe_len]);
+                                pending.drain(..safe_len);
+                            }
+                            break;
+                        };
+
+                        if tag_start > 0 {
+                            visible_text.push_str(&pending[..tag_start]);
+                            pending.drain(..tag_start);
                             continue;
                         }
 
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-
-                        if trimmed == "<think>" {
+                        if pending.starts_with(THINK_START) {
+                            pending.drain(..THINK_START.len());
                             in_think_block = true;
                             continue;
                         }
 
-                        if trimmed == "</think>" {
+                        if pending.starts_with(THINK_END) {
+                            pending.drain(..THINK_END.len());
                             continue;
                         }
 
-                        title.push_str(trimmed);
-                        return anyhow::Ok(());
+                        let is_possible_think_prefix = THINK_START.starts_with(&pending)
+                            || THINK_END.starts_with(&pending);
+                        if is_possible_think_prefix {
+                            break;
+                        }
+
+                        visible_text.push('<');
+                        pending.drain(..1);
+                    }
+
+                    if let Some(newline_index) = visible_text.find('\n') {
+                        let first_line = visible_text[..newline_index].trim();
+                        if !first_line.is_empty() {
+                            title.push_str(first_line);
+                            return anyhow::Ok(());
+                        }
+                        visible_text.drain(..newline_index + 1);
+                    }
+                }
+
+                if !in_think_block {
+                    visible_text.push_str(&pending);
+                    let first_line = visible_text.lines().next().unwrap_or(visible_text.as_str()).trim();
+                    if !first_line.is_empty() {
+                        title.push_str(first_line);
                     }
                 }
                 anyhow::Ok(())

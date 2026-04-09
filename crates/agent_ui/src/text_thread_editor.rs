@@ -2240,8 +2240,10 @@ impl TextThreadEditor {
     }
 
     pub fn regenerate_summary(&mut self, cx: &mut Context<Self>) {
-        self.text_thread
-            .update(cx, |text_thread, cx| text_thread.summarize(true, cx));
+        let selected_model = self.selected_model();
+        self.text_thread.update(cx, |text_thread, cx| {
+            text_thread.summarize(selected_model, true, cx)
+        });
     }
 
     fn render_remaining_tokens(&self, cx: &App) -> Option<impl IntoElement + use<>> {

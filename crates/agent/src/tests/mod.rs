@@ -3161,6 +3161,72 @@ async fn test_title_generation(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_title_generation_with_inline_think_tags(cx: &mut TestAppContext) {
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    let summary_model = Arc::new(FakeLanguageModel::default());
+    thread.update(cx, |thread, cx| {
+        thread.set_summarization_model(Some(summary_model.clone()), cx)
+    });
+
+    let send = thread
+        .update(cx, |thread, cx| {
+            thread.send(UserMessageId::new(), ["Hello"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    fake_model.send_last_completion_stream_text_chunk("Hey!");
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    summary_model.send_last_completion_stream_text_chunk(
+        "<think>Need a short title</think>Hello world",
+    );
+    summary_model.end_last_completion_stream();
+    send.collect::<Vec<_>>().await;
+    cx.run_until_parked();
+
+    thread.read_with(cx, |thread, _| {
+        assert_eq!(thread.title(), Some("Hello world".into()))
+    });
+}
+
+#[gpui::test]
+async fn test_title_generation_with_split_think_tags(cx: &mut TestAppContext) {
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    let summary_model = Arc::new(FakeLanguageModel::default());
+    thread.update(cx, |thread, cx| {
+        thread.set_summarization_model(Some(summary_model.clone()), cx)
+    });
+
+    let send = thread
+        .update(cx, |thread, cx| {
+            thread.send(UserMessageId::new(), ["Hello"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    fake_model.send_last_completion_stream_text_chunk("Hey!");
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    summary_model.send_last_completion_stream_text_chunk("<th");
+    summary_model.send_last_completion_stream_text_chunk("ink>Need a short title</th");
+    summary_model.send_last_completion_stream_text_chunk("ink>Hello world");
+    summary_model.end_last_completion_stream();
+    send.collect::<Vec<_>>().await;
+    cx.run_until_parked();
+
+    thread.read_with(cx, |thread, _| {
+        assert_eq!(thread.title(), Some("Hello world".into()))
+    });
+}
+
+#[gpui::test]
 async fn test_building_request_with_pending_tools(cx: &mut TestAppContext) {
     let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
     let fake_model = model.as_fake();
