@@ -1227,6 +1227,8 @@ fn initialize_pane(
                 )
             });
             toolbar.add_item(buffer_search_bar.clone(), window, cx);
+            let text_thread_toolbar = cx.new(|_| agent_ui::TextThreadToolbar::new());
+            toolbar.add_item(text_thread_toolbar, window, cx);
             let quick_action_bar =
                 cx.new(|cx| QuickActionBar::new(buffer_search_bar, workspace, cx));
             toolbar.add_item(quick_action_bar, window, cx);

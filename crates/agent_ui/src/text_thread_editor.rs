@@ -59,7 +59,7 @@ use ui::{
 };
 use util::{ResultExt, maybe};
 use workspace::{
-    CollaboratorId, ItemId, WorkspaceId,
+    CollaboratorId, ItemId, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, WorkspaceId,
     searchable::{Direction, SearchToken, SearchableItemHandle},
 };
 
@@ -2748,6 +2748,77 @@ struct SelectedCreaseMetadata {
     crease: CreaseMetadata,
 }
 
+pub struct TextThreadToolbar {
+    active_text_thread_editor: Option<WeakEntity<TextThreadEditor>>,
+}
+
+impl TextThreadToolbar {
+    pub fn new() -> Self {
+        Self {
+            active_text_thread_editor: None,
+        }
+    }
+}
+
+impl EventEmitter<ToolbarItemEvent> for TextThreadToolbar {}
+
+impl ToolbarItemView for TextThreadToolbar {
+    fn set_active_pane_item(
+        &mut self,
+        active_pane_item: Option<&dyn workspace::ItemHandle>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ToolbarItemLocation {
+        self.active_text_thread_editor = active_pane_item
+            .and_then(|item| item.act_as::<TextThreadEditor>(cx))
+            .map(|item| item.downgrade());
+
+        if self.active_text_thread_editor.is_some() {
+            ToolbarItemLocation::PrimaryLeft
+        } else {
+            ToolbarItemLocation::Hidden
+        }
+    }
+}
+
+impl Render for TextThreadToolbar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(text_thread_editor) = self
+            .active_text_thread_editor
+            .as_ref()
+            .and_then(|editor| editor.upgrade())
+        else {
+            return Empty.into_any_element();
+        };
+
+        let title_editor = text_thread_editor.read(cx).title_editor();
+        let focus_handle = text_thread_editor.focus_handle(cx);
+
+        h_flex()
+            .w_full()
+            .h_8()
+            .items_center()
+            .child(
+                div()
+                    .w_full()
+                    .on_action({
+                        let focus_handle = focus_handle.clone();
+                        move |_: &menu::Confirm, window, cx| {
+                            focus_handle.focus(window, cx);
+                        }
+                    })
+                    .on_action({
+                        let focus_handle = focus_handle.clone();
+                        move |_: &editor::actions::Cancel, window, cx| {
+                            focus_handle.focus(window, cx);
+                        }
+                    })
+                    .child(title_editor),
+            )
+            .into_any_element()
+    }
+}
+
 impl EventEmitter<EditorEvent> for TextThreadEditor {}
 impl EventEmitter<SearchEvent> for TextThreadEditor {}
 
@@ -2776,28 +2847,6 @@ impl Render for TextThreadEditor {
                 });
             }))
             .size_full()
-            .child(
-                div()
-                    .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .border_b_1()
-                    .border_color(cx.theme().colors().border_variant)
-                    .bg(cx.theme().colors().editor_background)
-                    .on_action({
-                        let editor = self.editor.clone();
-                        move |_: &menu::Confirm, window, cx| {
-                            editor.focus_handle(cx).focus(window, cx);
-                        }
-                    })
-                    .on_action({
-                        let editor = self.editor.clone();
-                        move |_: &editor::actions::Cancel, window, cx| {
-                            editor.focus_handle(cx).focus(window, cx);
-                        }
-                    })
-                    .child(self.title_editor.clone()),
-            )
             .child(
                 div()
                     .flex_grow()

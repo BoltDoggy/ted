@@ -75,7 +75,7 @@ pub use external_source_prompt::ExternalSourcePrompt;
 pub(crate) use mode_selector::ModeSelector;
 pub(crate) use model_selector::ModelSelector;
 pub(crate) use model_selector_popover::ModelSelectorPopover;
-pub use text_thread_editor::{AgentPanelDelegate, TextThreadEditor};
+pub use text_thread_editor::{AgentPanelDelegate, TextThreadEditor, TextThreadToolbar};
 pub(crate) use thread_history::ThreadHistory;
 pub(crate) use thread_history_view::*;
 use zed_actions;
