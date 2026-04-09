@@ -1589,7 +1589,7 @@ impl InlineAssistant {
         }
 
         let text_thread_editor = agent_panel
-            .and_then(|panel| panel.read(cx).active_text_thread_editor())
+            .and_then(|panel| panel.read(cx).active_text_thread_editor(cx))
             .and_then(|editor| {
                 let editor = &editor.read(cx).editor().clone();
                 if editor.read(cx).is_focused(window) {

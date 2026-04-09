@@ -234,6 +234,68 @@ impl TextThreadEditor {
         .detach();
     }
 
+    pub fn deploy(
+        text_thread: Entity<TextThread>,
+        fs: Arc<dyn Fs>,
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        lsp_adapter_delegate: Option<Arc<dyn LspAdapterDelegate>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self>> {
+        workspace.update(cx, |workspace, cx| {
+            Ok(Self::deploy_in_workspace(
+                text_thread,
+                fs,
+                workspace,
+                project,
+                lsp_adapter_delegate,
+                window,
+                cx,
+            ))
+        })?
+    }
+
+    pub fn deploy_in_workspace(
+        text_thread: Entity<TextThread>,
+        fs: Arc<dyn Fs>,
+        workspace: &mut Workspace,
+        project: Entity<Project>,
+        lsp_adapter_delegate: Option<Arc<dyn LspAdapterDelegate>>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
+        let text_thread_id = text_thread.read(cx).id();
+        let existing_editor = workspace.items_of_type::<TextThreadEditor>(cx).find(|editor| {
+            editor.read(cx).text_thread().read(cx).id() == text_thread_id
+        });
+
+        if let Some(existing_editor) = existing_editor {
+            workspace.activate_item(&existing_editor, true, true, window, cx);
+            existing_editor
+        } else {
+            let text_thread_editor = cx.new(|cx| {
+                Self::for_text_thread(
+                    text_thread,
+                    fs,
+                    workspace.weak_handle(),
+                    project,
+                    lsp_adapter_delegate,
+                    window,
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(
+                Box::new(text_thread_editor.clone()),
+                None,
+                true,
+                window,
+                cx,
+            );
+            text_thread_editor
+        }
+    }
+
     pub fn for_text_thread(
         text_thread: Entity<TextThread>,
         fs: Arc<dyn Fs>,
