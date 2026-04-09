@@ -1,4 +1,5 @@
 use crate::{
+    DEFAULT_THREAD_TITLE,
     language_model_selector::{LanguageModelSelector, language_model_selector},
     mention_set::load_external_image_from_path,
     ui::ModelSelectorTooltip,
@@ -192,6 +193,7 @@ pub struct TextThreadEditor {
     project: Entity<Project>,
     lsp_adapter_delegate: Option<Arc<dyn LspAdapterDelegate>>,
     editor: Entity<Editor>,
+    title_editor: Entity<Editor>,
     pending_thought_process: Option<(CreaseId, language::Anchor)>,
     blocks: HashMap<MessageId, (MessageHeader, CustomBlockId)>,
     image_blocks: HashSet<CustomBlockId>,
@@ -335,11 +337,18 @@ impl TextThreadEditor {
             editor
         });
 
+        let title_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_text(text_thread.read(cx).summary().or_default(), window, cx);
+            editor
+        });
+
         let _subscriptions = vec![
             cx.observe(&text_thread, |_, _, cx| cx.notify()),
             cx.subscribe_in(&text_thread, window, Self::handle_text_thread_event),
             cx.subscribe_in(&editor, window, Self::handle_editor_event),
             cx.subscribe_in(&editor, window, Self::handle_editor_search_event),
+            cx.subscribe_in(&title_editor, window, Self::handle_title_editor_event),
             cx.observe_global_in::<SettingsStore>(window, Self::settings_changed),
         ];
 
@@ -360,6 +369,7 @@ impl TextThreadEditor {
             text_thread,
             slash_commands,
             editor,
+            title_editor,
             lsp_adapter_delegate,
             blocks: Default::default(),
             image_blocks: Default::default(),
@@ -456,6 +466,45 @@ impl TextThreadEditor {
 
     pub fn editor(&self) -> &Entity<Editor> {
         &self.editor
+    }
+
+    pub fn title_editor(&self) -> Entity<Editor> {
+        self.title_editor.clone()
+    }
+
+    fn handle_title_editor_event(
+        &mut self,
+        title_editor: &Entity<Editor>,
+        event: &EditorEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            EditorEvent::BufferEdited => {
+                if !title_editor.read(cx).is_focused(window) {
+                    return;
+                }
+
+                let new_title = title_editor.read(cx).text(cx);
+                let current_summary = self.text_thread.read(cx).summary().or_default();
+                if new_title == current_summary {
+                    return;
+                }
+
+                self.text_thread.update(cx, |text_thread, cx| {
+                    text_thread.set_custom_summary(new_title, cx);
+                });
+            }
+            EditorEvent::Blurred => {
+                if title_editor.read(cx).text(cx).is_empty() {
+                    let summary = self.text_thread.read(cx).summary().unwrap_or(DEFAULT_THREAD_TITLE);
+                    title_editor.update(cx, |editor, cx| {
+                        editor.set_text(summary, window, cx);
+                    });
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn insert_default_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -701,6 +750,12 @@ impl TextThreadEditor {
                 });
             }
             TextThreadEvent::SummaryChanged => {
+                let summary = self.text_thread.read(cx).summary().or_default();
+                if self.title_editor.read(cx).text(cx) != summary {
+                    self.title_editor.update(cx, |title_editor, cx| {
+                        title_editor.set_text(summary, window, cx);
+                    });
+                }
                 cx.emit(EditorEvent::TitleChanged);
                 self.text_thread.update(cx, |text_thread, cx| {
                     text_thread.save(Some(Duration::from_millis(500)), self.fs.clone(), cx);
@@ -2721,6 +2776,28 @@ impl Render for TextThreadEditor {
                 });
             }))
             .size_full()
+            .child(
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .bg(cx.theme().colors().editor_background)
+                    .on_action({
+                        let editor = self.editor.clone();
+                        move |_: &menu::Confirm, window, cx| {
+                            editor.focus_handle(cx).focus(window, cx);
+                        }
+                    })
+                    .on_action({
+                        let editor = self.editor.clone();
+                        move |_: &editor::actions::Cancel, window, cx| {
+                            editor.focus_handle(cx).focus(window, cx);
+                        }
+                    })
+                    .child(self.title_editor.clone()),
+            )
             .child(
                 div()
                     .flex_grow()
