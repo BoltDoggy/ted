@@ -1440,15 +1440,24 @@ impl AgentPanel {
     }
 
     pub fn go_back(&mut self, _: &workspace::GoBack, window: &mut Window, cx: &mut Context<Self>) {
-        match self.active_view {
-            ActiveView::Configuration | ActiveView::History { .. } => {
-                if let Some(previous_view) = self.previous_view.take() {
-                    self.set_active_view(previous_view, true, window, cx);
-                }
-                cx.notify();
+        if matches!(
+            self.active_view,
+            ActiveView::History {
+                history: History::TextThreads,
             }
-            _ => {}
+        ) {
+            return;
         }
+
+        self.set_active_view(
+            ActiveView::History {
+                history: History::TextThreads,
+            },
+            true,
+            window,
+            cx,
+        );
+        cx.notify();
     }
 
     pub fn toggle_navigation_menu(
@@ -3943,12 +3952,18 @@ impl AgentPanel {
                         .size_full()
                         .gap(DynamicSpacing::Base04.rems(cx))
                         .pl(DynamicSpacing::Base04.rems(cx))
-                        .child(match &self.active_view {
-                            ActiveView::History { .. } | ActiveView::Configuration => {
+                        .child(
+                            if matches!(
+                                self.active_view,
+                                ActiveView::History {
+                                    history: History::TextThreads,
+                                }
+                            ) {
+                                selected_agent.into_any_element()
+                            } else {
                                 self.render_toolbar_back_button(cx).into_any_element()
-                            }
-                            _ => selected_agent.into_any_element(),
-                        })
+                            },
+                        )
                         .child(self.render_title_view(window, cx)),
                 )
                 .child(
