@@ -81,6 +81,8 @@ struct Session {
     thread: Entity<Thread>,
     /// The ACP thread that handles protocol communication
     acp_thread: Entity<acp_thread::AcpThread>,
+    selector_refresh_rx: watch::Receiver<()>,
+    selector_refresh_tx: watch::Sender<()>,
     project_id: EntityId,
     pending_save: Task<Result<()>>,
     _subscriptions: Vec<Subscription>,
@@ -91,19 +93,17 @@ pub struct LanguageModels {
     models: HashMap<acp::ModelId, Arc<dyn LanguageModel>>,
     /// Cached list for returning language model information
     model_list: acp_thread::AgentModelList,
-    refresh_models_rx: watch::Receiver<()>,
     refresh_models_tx: watch::Sender<()>,
     _authenticate_all_providers_task: Task<()>,
 }
 
 impl LanguageModels {
     fn new(cx: &mut App) -> Self {
-        let (refresh_models_tx, refresh_models_rx) = watch::channel(());
+        let (refresh_models_tx, _refresh_models_rx) = watch::channel(());
 
         let mut this = Self {
             models: HashMap::default(),
             model_list: acp_thread::AgentModelList::Grouped(IndexMap::default()),
-            refresh_models_rx,
             refresh_models_tx,
             _authenticate_all_providers_task: Self::authenticate_all_language_model_providers(cx),
         };
@@ -156,10 +156,6 @@ impl LanguageModels {
         self.models = models;
         self.model_list = acp_thread::AgentModelList::Grouped(language_model_list);
         self.refresh_models_tx.send(()).ok();
-    }
-
-    fn watch(&self) -> watch::Receiver<()> {
-        self.refresh_models_rx.clone()
     }
 
     pub fn model_from_id(&self, model_id: &acp::ModelId) -> Option<Arc<dyn LanguageModel>> {
@@ -372,9 +368,12 @@ impl NativeAgent {
             )
         });
 
+        let (selector_refresh_tx, selector_refresh_rx) = watch::channel(());
+
         let subscriptions = vec![
             cx.subscribe(&thread_handle, Self::handle_thread_title_updated),
             cx.subscribe(&thread_handle, Self::handle_thread_token_usage_updated),
+            cx.subscribe(&thread_handle, Self::handle_thread_model_updated),
             cx.observe(&thread_handle, move |this, thread, cx| {
                 this.save_thread(thread, cx)
             }),
@@ -385,6 +384,8 @@ impl NativeAgent {
             Session {
                 thread: thread_handle,
                 acp_thread: acp_thread.clone(),
+                selector_refresh_rx,
+                selector_refresh_tx,
                 project_id,
                 _subscriptions: subscriptions,
                 pending_save: Task::ready(Ok(())),
@@ -689,6 +690,19 @@ impl NativeAgent {
         session.acp_thread.update(cx, |acp_thread, cx| {
             acp_thread.update_token_usage(usage.0.clone(), cx);
         });
+    }
+
+    fn handle_thread_model_updated(
+        &mut self,
+        thread: Entity<Thread>,
+        _event: &ModelUpdated,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get_mut(thread.read(cx).id()) else {
+            return;
+        };
+
+        session.selector_refresh_tx.send(()).ok();
     }
 
     fn handle_project_event(
@@ -1391,7 +1405,9 @@ impl acp_thread::AgentModelSelector for NativeAgentModelSelector {
     }
 
     fn watch(&self, cx: &mut App) -> Option<watch::Receiver<()>> {
-        Some(self.connection.0.read(cx).models.watch())
+        self.connection.0.read(cx).sessions.get(&self.session_id).map(|session| {
+            session.selector_refresh_rx.clone()
+        })
     }
 
     fn should_render_footer(&self) -> bool {

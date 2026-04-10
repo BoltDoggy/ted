@@ -26,10 +26,11 @@ use gpui::{
 use indoc::indoc;
 use language_model::{
     CompletionIntent, LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
-    LanguageModelId, LanguageModelProviderName, LanguageModelRegistry, LanguageModelRequest,
-    LanguageModelRequestMessage, LanguageModelToolResult, LanguageModelToolSchemaFormat,
-    LanguageModelToolUse, MessageContent, Role, StopReason, TokenUsage,
-    fake_provider::FakeLanguageModel,
+    LanguageModelId, LanguageModelProviderId, LanguageModelProviderName, LanguageModelRegistry,
+    LanguageModelRequest, LanguageModelRequestMessage, LanguageModelToolResult,
+    LanguageModelToolSchemaFormat, LanguageModelToolUse, MessageContent, Role, StopReason,
+    TokenUsage,
+    fake_provider::{FakeLanguageModel, FakeLanguageModelProvider},
 };
 use pretty_assertions::assert_eq;
 use project::{
@@ -3322,6 +3323,22 @@ async fn test_agent_connection(cx: &mut TestAppContext) {
         language_model::init(user_store.clone(), client.clone(), cx);
         language_models::init(user_store, client.clone(), cx);
         LanguageModelRegistry::test(cx);
+
+        let alternate_model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "alt",
+            "alt-model",
+            "Alt Model",
+            false,
+        ));
+        let alternate_provider = Arc::new(
+            FakeLanguageModelProvider::new(
+                LanguageModelProviderId::from("alt".to_string()),
+                LanguageModelProviderName::from("Alt".to_string()),
+            )
+            .with_models(vec![alternate_model]),
+        );
+        LanguageModelRegistry::global(cx)
+            .update(cx, |registry, cx| registry.register_provider(alternate_provider, cx));
     });
     cx.executor().forbid_parking();
 
@@ -3371,6 +3388,23 @@ async fn test_agent_connection(cx: &mut TestAppContext) {
             .as_ref(),
         "fake/fake"
     );
+    assert_eq!(
+        listed_models[&AgentModelGroupName("Alt".into())][0]
+            .id
+            .0
+            .as_ref(),
+        "alt/alt-model"
+    );
+
+    let selector_two = connection
+        .model_selector(&session_id)
+        .expect("agent should always support ModelSelector");
+    let mut refresh_rx = cx
+        .update(|cx| selector.watch(cx))
+        .expect("session selector should expose watch receiver");
+    let mut second_refresh_rx = cx
+        .update(|cx| selector_two.watch(cx))
+        .expect("second selector should expose watch receiver");
 
     // Test selected_model returns the default
     let model = cx
@@ -3383,9 +3417,38 @@ async fn test_agent_connection(cx: &mut TestAppContext) {
     let model = model.as_fake();
     assert_eq!(model.id().0, "fake", "should return default model");
 
+    let mut refresh = std::pin::pin!(refresh_rx.recv());
+    let mut second_refresh = std::pin::pin!(second_refresh_rx.recv());
+    cx.update(|cx| {
+        selector
+            .select_model(acp::ModelId::new("alt/alt-model"), cx)
+            .detach_and_log_err(cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        refresh.as_mut().now_or_never().is_some(),
+        "current session selector should refresh after model change"
+    );
+    assert!(
+        second_refresh.as_mut().now_or_never().is_some(),
+        "selectors for the same session should share refresh notifications"
+    );
+
+    let selected_model = cx
+        .update(|cx| selector.selected_model(cx))
+        .await
+        .expect("selected_model should succeed after switching");
+    assert_eq!(selected_model.id.0.as_ref(), "alt/alt-model");
+
+    let current_model = cx
+        .update(|cx| agent.read(cx).models().model_from_id(&acp::ModelId::new("alt/alt-model")))
+        .unwrap();
+    let current_model = current_model.as_fake();
+
     let request = acp_thread.update(cx, |thread, cx| thread.send(vec!["abc".into()], cx));
     cx.run_until_parked();
-    model.send_last_completion_stream_text_chunk("def");
+    current_model.send_last_completion_stream_text_chunk("def");
     cx.run_until_parked();
     acp_thread.read_with(cx, |thread, cx| {
         assert_eq!(

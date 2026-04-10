@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use std::{
     any::{Any, TypeId},
+    cell::RefCell,
     cmp,
     ops::Range,
     path::{Path, PathBuf},
@@ -216,6 +217,7 @@ pub struct TextThreadEditor {
     language_model_selector: Entity<LanguageModelSelector>,
     language_model_selector_menu_handle: PopoverMenuHandle<LanguageModelSelector>,
     selected_model: Option<ConfiguredModel>,
+    selected_model_state: Rc<RefCell<Option<ConfiguredModel>>>,
 }
 
 const MAX_TAB_TITLE_LEN: usize = 16;
@@ -369,6 +371,7 @@ impl TextThreadEditor {
         let focus_handle = editor.read(cx).focus_handle(cx);
         let selected_model = load_persisted_selected_model(workspace_id, &text_thread, cx)
             .or_else(|| LanguageModelRegistry::read_global(cx).default_model());
+        let selected_model_state = Rc::new(RefCell::new(selected_model.clone()));
         let text_thread_editor = cx.entity().downgrade();
 
         let mut this = Self {
@@ -395,8 +398,8 @@ impl TextThreadEditor {
             language_model_selector: cx.new(|cx| {
                 language_model_selector(
                     {
-                        let selected_model = selected_model.clone();
-                        move |_| selected_model.clone()
+                        let selected_model_state = selected_model_state.clone();
+                        move |_| selected_model_state.borrow().clone()
                     },
                     {
                         let text_thread_editor = text_thread_editor.clone();
@@ -427,6 +430,7 @@ impl TextThreadEditor {
             }),
             language_model_selector_menu_handle: PopoverMenuHandle::default(),
             selected_model,
+            selected_model_state,
         };
         this.update_message_headers(cx);
         this.update_image_blocks(cx);
@@ -461,6 +465,7 @@ impl TextThreadEditor {
             .into_iter()
             .find(|provider| provider.id() == model.provider_id());
         self.selected_model = provider.map(|provider| ConfiguredModel { provider, model });
+        *self.selected_model_state.borrow_mut() = self.selected_model.clone();
         persist_selected_model(
             self.workspace_id,
             &self.text_thread,

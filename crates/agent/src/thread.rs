@@ -1397,6 +1397,9 @@ impl Thread {
     }
 
     pub fn set_model(&mut self, model: Arc<dyn LanguageModel>, cx: &mut Context<Self>) {
+        let model_changed = self.model.as_ref().is_none_or(|current_model| {
+            current_model.provider_id() != model.provider_id() || current_model.id() != model.id()
+        });
         let old_usage = self.latest_token_usage();
         self.model = Some(model.clone());
         let new_caps = Self::prompt_capabilities(self.model.as_deref());
@@ -1410,6 +1413,10 @@ impl Thread {
             subagent
                 .update(cx, |thread, cx| thread.set_model(model.clone(), cx))
                 .ok();
+        }
+
+        if model_changed {
+            cx.emit(ModelUpdated);
         }
 
         cx.notify()
@@ -3189,6 +3196,10 @@ impl RunningTurn {
 pub struct TokenUsageUpdated(pub Option<acp_thread::TokenUsage>);
 
 impl EventEmitter<TokenUsageUpdated> for Thread {}
+
+pub struct ModelUpdated;
+
+impl EventEmitter<ModelUpdated> for Thread {}
 
 pub struct TitleUpdated;
 
