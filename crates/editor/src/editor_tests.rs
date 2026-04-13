@@ -495,6 +495,37 @@ fn test_ime_composition(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_pending_input_offsets_are_clipped_to_char_boundaries(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let buffer = cx.new(|cx| {
+        let mut buffer = language::Buffer::local("ab。cd", cx);
+        buffer.set_group_interval(Duration::ZERO);
+        buffer
+    });
+    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+
+    cx.add_window(|window, cx| {
+        let snapshot = buffer.read(cx).snapshot(cx);
+        let clipped_left = Editor::clip_pending_input_offset(
+            &snapshot,
+            MultiBufferOffset(4),
+            Bias::Left,
+        );
+        let clipped_right = Editor::clip_pending_input_offset(
+            &snapshot,
+            MultiBufferOffset(4),
+            Bias::Right,
+        );
+
+        assert_eq!(clipped_left, MultiBufferOffset(2));
+        assert_eq!(clipped_right, MultiBufferOffset(5));
+
+        build_editor(buffer.clone(), window, cx)
+    });
+}
+
+#[gpui::test]
 fn test_selection_with_mouse(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 

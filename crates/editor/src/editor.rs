@@ -25218,6 +25218,14 @@ impl Editor {
         cx.notify();
     }
 
+    fn clip_pending_input_offset(
+        snapshot: &MultiBufferSnapshot,
+        offset: MultiBufferOffset,
+        bias: Bias,
+    ) -> MultiBufferOffset {
+        snapshot.clip_offset(offset, bias)
+    }
+
     pub fn observe_pending_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut pending: String = window
             .pending_input_keystrokes()
@@ -25245,9 +25253,17 @@ impl Editor {
                     .iter()
                     .map(|selection| (selection.end..selection.end, pending.clone()));
                 this.edit(edits, cx);
+
+                let snapshot = this.buffer.read(cx).snapshot(cx);
                 this.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
                     s.select_ranges(selections.into_iter().enumerate().map(|(ix, sel)| {
-                        sel.start + ix * pending.len()..sel.end + ix * pending.len()
+                        let shift = ix * pending.len();
+                        Self::clip_pending_input_offset(&snapshot, sel.start + shift, Bias::Left)
+                            ..Self::clip_pending_input_offset(
+                                &snapshot,
+                                sel.end + shift,
+                                Bias::Right,
+                            )
                     }));
                 });
                 if let Some(existing_ranges) = existing_pending {
@@ -25262,10 +25278,13 @@ impl Editor {
             .all::<MultiBufferOffset>(&snapshot.display_snapshot)
             .into_iter()
             .map(|selection| {
+                let end = Self::clip_pending_input_offset(
+                    snapshot.buffer_snapshot(),
+                    selection.end + pending.len(),
+                    Bias::Right,
+                );
                 snapshot.buffer_snapshot().anchor_after(selection.end)
-                    ..snapshot
-                        .buffer_snapshot()
-                        .anchor_before(selection.end + pending.len())
+                    ..snapshot.buffer_snapshot().anchor_before(end)
             })
             .collect();
 
